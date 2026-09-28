@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Prompt Library</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; display: flex; height: 100vh; font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    font-size: 13px; background: canvas; color: canvastext;
+  }
+  #list-pane { width: 300px; border-right: 1px solid #8884; display: flex; flex-direction: column; }
+  #search { margin: 8px; padding: 6px 8px; }
+  #list { overflow-y: auto; flex: 1; }
+  .item { padding: 8px 10px; border-bottom: 1px solid #8882; cursor: pointer; }
+  .item:hover { background: #8881; }
+  .item.active { background: #4a90e222; border-left: 3px solid #4a90e2; }
+  .item-title { font-weight: 600; }
+  .item-preview { opacity: 0.7; font-size: 11px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #new-btn { margin: 0 8px 8px 8px; padding: 6px; cursor: pointer; }
+  #detail-pane { flex: 1; padding: 14px; overflow-y: auto; }
+  #detail-pane.empty { display: flex; align-items: center; justify-content: center; opacity: 0.6; }
+  label { display: block; margin: 10px 0 4px 0; font-weight: 600; }
+  input[type=text], textarea { width: 100%; padding: 6px 8px; font-family: inherit; }
+  textarea#template { font-family: ui-monospace, Consolas, monospace; font-size: 12px; min-height: 260px; resize: vertical; }
+  .var-row { display: flex; gap: 8px; align-items: center; margin: 4px 0; }
+  .var-row label { margin: 0; min-width: 140px; font-weight: normal; }
+  .var-row input { flex: 1; }
+  .toolbar { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  button { padding: 6px 12px; cursor: pointer; }
+  button.danger { color: #d33; }
+  button.primary { font-weight: 600; }
+  #status { margin-top: 8px; font-size: 12px; min-height: 16px; }
+  #status.warn { color: #c80; }
+  #status.ok { color: #2a2; }
+  #status.err { color: #d33; }
+  .hint { opacity: 0.65; font-size: 11px; margin-top: 16px; border-top: 1px solid #8883; padding-top: 8px; }
+  #vars-none { opacity: 0.6; font-style: italic; }
+</style>
+</head>
+<body>
+  <div id="list-pane">
+    <input id="search" type="text" placeholder="Search prompts..." />
+    <button id="new-btn">+ New prompt</button>
+    <div id="list"></div>
+  </div>
+  <div id="detail-pane" class="empty">Select a prompt, or create a new one.</div>
+
+<script>
+let prompts = [];
+let currentId = null;
+let editing = false;
+
+function escapeHtml(s) {
+  return String(s || "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+function extractVars(template) {
+  const re = /\{\{\s*([A-Z0-9_]+)\s*\}\}/g;
+  const names = [];
+  let m;
+  while ((m = re.exec(template || ""))) if (!names.includes(m[1])) names.push(m[1]);
+  return names;
+}
+
+function renderTemplateClient(template, values) {
+  const unresolved = [];
+  const rendered = (template || "").replace(/\{\{\s*([A-Z0-9_]+)\s*\}\}/g, (whole, name) => {
+    const v = values[name];
+    if (v !== undefined && v !== null && String(v).length > 0) return String(v);
+    unresolved.push(name);
+    return whole;
+  });
+  return { rendered, unresolved };
+}
+
+async function loadList() {
+  const res = await fetch("/api/prompts");
+  prompts = await res.json();
+  renderList();
+}
+
+function renderList() {
+  const q = document.getElementById("search").value.toLowerCase();
+  const listEl = document.getElementById("list");
+  listEl.innerHTML = "";
+  prompts
+    .filter(p => !q || p.title.toLowerCase().includes(q) || p.preview.toLowerCase().includes(q))
+    .forEach(p => {
+      const el = document.createElement("div");
+      el.className = "item" + (p.id === currentId ? " active" : "");
+      el.innerHTML = '<div class="item-title">' + escapeHtml(p.title) + '</div><div class="item-preview">' + escapeHtml(p.preview) + '</div>';
+      el.onclick = () => openPrompt(p.id);
+      listEl.appendChild(el);
+    });
+}
+
+async function openPrompt(id) {
+  currentId = id;
+  editing = false;
+  renderList();
+  const res = await fetch("/api/prompts/" + encodeURIComponent(id));
+  if (!res.ok) { showDetailEmpty("Prompt not found."); return; }
+  const p = await res.json();
+  renderDetail(p);
+}
+
+function newPrompt() {
+  currentId = null;
+  editing = true;
+  renderList();
+  renderDetail({ id: "", title: "", template: "", variables: [] });
+}
+
+function showDetailEmpty(msg) {
+  const el = document.getElementById("detail-pane");
+  el.className = "empty";
+  el.textContent = msg || "Select a prompt, or create a new one.";
+}
+
+function renderDetail(p) {
+  const el = document.getElementById("detail-pane");
+  el.className = "";
+  const varNames = extractVars(p.template);
+  const descByName = {};
+  (p.variables || []).forEach(v => descByName[v.name] = v.description || "");
+
+  el.innerHTML = `
+    <label>Title</label>
+    <input id="title" type="text" value="${escapeHtml(p.title)}" />
+    <label>Template <span style="font-weight:normal;opacity:0.7">(use {{VAR_NAME}} for fill-in values)</span></label>
+    <textarea id="template">${escapeHtml(p.template)}</textarea>
+    <label>Variables to fill in for Copy / Insert</label>
+    <div id="vars-container"></div>
+    <div class="toolbar">
+      <button id="save-btn" class="primary">Save</button>
+      ${p.id ? '<button id="delete-btn" class="danger">Delete</button>' : ""}
+      <button id="copy-btn">Copy rendered text</button>
+      ${p.id ? '<button id="insert-btn" class="primary">Insert into this chat</button>' : ""}
+    </div>
+    <div id="status"></div>
+    <div class="hint">
+      "Insert into this chat" sends the rendered prompt into the session this panel is attached to.
+      To run the same prompt against several targets in parallel (e.g. multiple PRs at once), ask the
+      agent in chat to render and start a separate session per target instead — a single chat/canvas
+      instance can only run one thing at a time.
+    </div>
+  `;
+
+  function refreshVarInputs() {
+    const template = document.getElementById("template").value;
+    const names = extractVars(template);
+    const container = document.getElementById("vars-container");
+    if (names.length === 0) {
+      container.innerHTML = '<div id="vars-none">No {{VAR}} placeholders in this template.</div>';
+      return;
+    }
+    container.innerHTML = "";
+    names.forEach(name => {
+      const row = document.createElement("div");
+      row.className = "var-row";
+      row.innerHTML = '<label>' + escapeHtml(name) + '</label><input data-var="' + escapeHtml(name) + '" type="text" placeholder="' + escapeHtml(descByName[name] || "") + '" />';
+      container.appendChild(row);
+    });
+  }
+  refreshVarInputs();
+  document.getElementById("template").addEventListener("input", refreshVarInputs);
+
+  function collectValues() {
+    const values = {};
+    document.querySelectorAll("#vars-container input[data-var]").forEach(inp => {
+      values[inp.dataset.var] = inp.value;
+    });
+    return values;
+  }
+
+  function setStatus(msg, kind) {
+    const s = document.getElementById("status");
+    s.textContent = msg;
+    s.className = kind || "";
+  }
+
+  document.getElementById("save-btn").onclick = async () => {
+    const title = document.getElementById("title").value.trim();
+    const template = document.getElementById("template").value;
+    if (!title || !template) { setStatus("Title and template are required.", "err"); return; }
+    const body = { title, template };
+    const url = p.id ? "/api/prompts/" + encodeURIComponent(p.id) : "/api/prompts";
+    const method = p.id ? "PUT" : "POST";
+    const res = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (!res.ok) { setStatus("Save failed.", "err"); return; }
+    const saved = await res.json();
+    currentId = saved.id;
+    setStatus("Saved.", "ok");
+    await loadList();
+    openPrompt(saved.id);
+  };
+
+  if (p.id) {
+    document.getElementById("delete-btn").onclick = async () => {
+      if (!confirm('Delete "' + p.title + '"? This cannot be undone.')) return;
+      const res = await fetch("/api/prompts/" + encodeURIComponent(p.id), { method: "DELETE" });
+      if (!res.ok) { setStatus("Delete failed.", "err"); return; }
+      currentId = null;
+      await loadList();
+      showDetailEmpty("Deleted.");
+    };
+  }
+
+  document.getElementById("copy-btn").onclick = async () => {
+    const template = document.getElementById("template").value;
+    const { rendered, unresolved } = renderTemplateClient(template, collectValues());
+    await navigator.clipboard.writeText(rendered);
+    setStatus(unresolved.length ? "Copied (unfilled: " + unresolved.join(", ") + ")" : "Copied to clipboard.", unresolved.length ? "warn" : "ok");
+  };
+
+  if (p.id) {
+    document.getElementById("insert-btn").onclick = async () => {
+      const values = collectValues();
+      let res = await fetch("/api/prompts/" + encodeURIComponent(p.id) + "/insert", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ variables: values })
+      });
+      if (res.status === 409) {
+        const data = await res.json();
+        if (!confirm("Unfilled placeholders: " + data.unresolved.join(", ") + ". Insert anyway?")) return;
+        res = await fetch("/api/prompts/" + encodeURIComponent(p.id) + "/insert?force=1", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ variables: values })
+        });
+      }
+      if (!res.ok) { setStatus("Insert failed.", "err"); return; }
+      setStatus("Inserted into chat.", "ok");
+    };
+  }
+}
+
+document.getElementById("search").addEventListener("input", renderList);
+document.getElementById("new-btn").addEventListener("click", newPrompt);
+loadList();
+</script>
+</body>
+</html>
